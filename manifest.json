@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "cylon58.tailnet-presence",
+  "name": "Tailnet Presence",
+  "version": "0.1.0",
+  "author": "cylon58",
+  "license": "MIT",
+  "description": "Tailscale status with green online and red offline machine indicators.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Tailnet Presence",
+    "description": "Show every Tailscale machine with green online and red offline indicators.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 30
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 30
+      }
+    ]
+  }
+}
