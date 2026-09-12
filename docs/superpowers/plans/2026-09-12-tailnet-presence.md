@@ -13,6 +13,7 @@
 ## Global Constraints
 
 - Plugin ID is `cylon58.tailnet-presence`; display name is `Tailnet Presence`.
+- Manifest metadata declares `omarchy.clonedFrom` as `omarchy.tailscale`.
 - Preserve all non-Mullvad peers from `tailscale status --json`, including offline peers.
 - Use `#76c893` for online machine glyphs and Omarchy theme `Color.urgent` for offline glyphs.
 - Do not modify `/usr/share/omarchy`.
@@ -24,7 +25,7 @@
 
 **Files:**
 - Create: `tests/model.test.cjs`
-- Create: `src/Model.js`
+- Create: `Model.js`
 
 **Interfaces:**
 - Consumes: Tailscale `status --json` peer map.
@@ -65,24 +66,24 @@ Replace the conditional peer insertion with unconditional `peers.push(normalized
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `node --test tests/model.test.cjs src/Model.js`
+Run: `MODEL_PATH=Model.js node tests/model.test.cjs`
 
 Expected: PASS, with both `atlas` and `beacon` present.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/Model.js tests/model.test.cjs
+git add Model.js tests/model.test.cjs
 git commit -m "feat: retain offline tailnet machines"
 ```
 
 ### Task 2: Render peer presence colors in the standalone panel
 
 **Files:**
-- Create: `src/Panel.qml`
-- Create: `src/Service.qml`
-- Create: `src/TailscaleIcon.qml`
-- Create: `src/manifest.json`
+- Create: `Panel.qml`
+- Create: `Service.qml`
+- Create: `TailscaleIcon.qml`
+- Create: `manifest.json`
 
 **Interfaces:**
 - Consumes: normalized peers from `Service.qml` and the Omarchy `Color` palette.
@@ -103,14 +104,14 @@ Set the manifest ID, name, version, author, description, and bar-widget display 
 
 - [ ] **Step 2: Run unit and QML checks**
 
-Run: `node --test tests/model.test.cjs && qmllint src/Panel.qml src/Service.qml src/TailscaleIcon.qml`
+Run: `MODEL_PATH=Model.js node tests/model.test.cjs && /usr/lib/qt6/bin/qmlformat -n Panel.qml Service.qml TailscaleIcon.qml`
 
 Expected: all Node tests pass and `qmllint` exits successfully.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add src tests
+git add Model.js Panel.qml Service.qml TailscaleIcon.qml manifest.json tests
 git commit -m "feat: color tailnet machines by presence"
 ```
 
@@ -132,7 +133,7 @@ refresh configuration, and MIT/Omarchy attribution.
 
 - [ ] **Step 2: Run complete verification and live-install check**
 
-Run: `node --test tests/*.test.cjs && qmllint src/Panel.qml src/Service.qml src/TailscaleIcon.qml && omarchy plugin add file:///home/geoff/Work/omarchy-tailnet-presence && omarchy-plugin-list --json`
+Run: `MODEL_PATH=Model.js node tests/model.test.cjs && /usr/lib/qt6/bin/qmlformat -n Panel.qml Service.qml TailscaleIcon.qml && omarchy plugin add file:///home/geoff/Work/omarchy-tailnet-presence && omarchy-plugin-list --json`
 
 Expected: tests and QML validation pass; the plugin list includes `cylon58.tailnet-presence`.
 

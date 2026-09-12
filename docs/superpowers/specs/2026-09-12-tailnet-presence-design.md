@@ -10,9 +10,11 @@ or red machine icon.
 
 The public repository is named `omarchy-tailnet-presence`. It exposes one
 Omarchy bar-widget plugin with the ID `cylon58.tailnet-presence` and the
-display name `Tailnet Presence`. The repository is MIT licensed and retains
-attribution to Omarchy's MIT-licensed Tailscale panel, from which its
-self-contained panel implementation is derived.
+display name `Tailnet Presence`. Its manifest declares `clonedFrom:
+omarchy.tailscale`, so it replaces the built-in Tailscale widget without a
+bar-layout change. The repository is MIT licensed and retains attribution to
+Omarchy's MIT-licensed Tailscale panel, from which its self-contained panel
+implementation is derived.
 
 Users install it with:
 
@@ -38,9 +40,10 @@ node selection, peer address copying, and Taildrop where available.
 
 ## Structure
 
-`src/` contains the complete QML panel and its adjacent JavaScript model,
-service, icon, and manifest. `tests/` contains Node-based tests for the status
-model. The status model is the boundary between Tailscale JSON and the QML
+The repository root contains `manifest.json` and the complete QML panel,
+adjacent JavaScript model, service, and icon so `omarchy plugin add` can
+discover it directly. `tests/` contains Node-based tests for the status model.
+The status model is the boundary between Tailscale JSON and the QML
 view: it must return all non-Mullvad peers, each with a boolean `Online` field
 and a `presence` field (`online` or `offline`), sorted by hostname.
 
@@ -48,6 +51,6 @@ and a `presence` field (`online` or `offline`), sorted by hostname.
 
 The test fixture includes one online and one offline peer. Tests prove both
 peers reach the normalized model and retain their separate connection states.
-The QML panel is checked with `qmllint` when it is installed, then copied into
-the user's Omarchy plugin directory and rescanned for a live integration
-check. The public repository includes installation and update instructions.
+The QML panel is syntax-checked, then installed into the user's Omarchy plugin
+directory and rescanned for a live integration check. The public repository
+includes installation and update instructions.

@@ -6,6 +6,9 @@
   "author": "cylon58",
   "license": "MIT",
   "description": "Tailscale status with green online and red offline machine indicators.",
+  "omarchy": {
+    "clonedFrom": "omarchy.tailscale"
+  },
   "kinds": [
     "bar-widget"
   ],
