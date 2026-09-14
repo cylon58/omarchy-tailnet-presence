@@ -42,8 +42,24 @@ Item {
   property string lastError: ""
 
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 30, 5, 3600)
-  readonly property bool busy: whichProcess.running || statusProcess.running || mullvadExitNodesProcess.running || accountsProcess.running || actionProcess.running || loginProcess.running || switchProcess.running || operatorProcess.running || exitNodeProcess.running
+  readonly property string tailscalePath: "/usr/bin/tailscale"
+  readonly property string wlCopyPath: "/usr/bin/wl-copy"
+  readonly property string pkexecPath: "/usr/bin/pkexec"
+  readonly property string taildropPath: "/usr/bin/omarchy-tailscale-send"
+  readonly property string browserLauncherPath: "/usr/bin/omarchy-launch-browser"
+  readonly property int maxOutputChars: 262144
+  readonly property int commandTimeoutMs: 15000
+  readonly property var safeEnvironment: ({
+    "PATH": "/usr/bin:/bin",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8"
+  })
+  readonly property bool busy: installCheckProcess.running || statusProcess.running || mullvadExitNodesProcess.running || accountsProcess.running || actionProcess.running || loginProcess.running || switchProcess.running || operatorProcess.running || exitNodeProcess.running || clipboardProcess.running || taildropProcess.running || browserProcess.running
   readonly property string userName: Quickshell.env("USER") || Quickshell.env("LOGNAME")
+
+  property var _processDeadlines: ({})
+  property var _timedOutProcesses: ({})
+  property var _truncatedOutputs: ({})
 
   property string _statusOutput: ""
   property string _statusError: ""
@@ -103,10 +119,92 @@ Item {
     return Model.accountLabel(account)
   }
 
+  function tailscaleCommand(args) {
+    return [tailscalePath].concat(args || [])
+  }
+
+  function operatorEnvironment() {
+    return {
+      "PATH": "/usr/bin:/bin",
+      "LANG": "C.UTF-8",
+      "LC_ALL": "C.UTF-8",
+      "DISPLAY": Quickshell.env("DISPLAY") || "",
+      "WAYLAND_DISPLAY": Quickshell.env("WAYLAND_DISPLAY") || "",
+      "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR") || "",
+      "DBUS_SESSION_BUS_ADDRESS": Quickshell.env("DBUS_SESSION_BUS_ADDRESS") || ""
+    }
+  }
+
+  function startManaged(process, command, timeoutMs) {
+    if (process.running) return false
+    var name = String(process.objectName || "")
+    var deadlines = {}
+    for (var key in _processDeadlines) deadlines[key] = _processDeadlines[key]
+    deadlines[name] = { process: process, deadline: Date.now() + timeoutMs }
+    _processDeadlines = deadlines
+    process.command = command
+    process.running = true
+    return true
+  }
+
+  function finishManaged(process) {
+    var name = String(process.objectName || "")
+    var timedOut = _timedOutProcesses[name] === true
+    var deadlines = {}
+    var timeouts = {}
+    for (var key in _processDeadlines) {
+      if (key !== name) deadlines[key] = _processDeadlines[key]
+    }
+    for (var timeoutName in _timedOutProcesses) {
+      if (timeoutName !== name) timeouts[timeoutName] = _timedOutProcesses[timeoutName]
+    }
+    _processDeadlines = deadlines
+    _timedOutProcesses = timeouts
+    return timedOut
+  }
+
+  function clearOutput(name) {
+    root[name] = ""
+    var limits = {}
+    for (var key in _truncatedOutputs) {
+      if (key !== name) limits[key] = _truncatedOutputs[key]
+    }
+    _truncatedOutputs = limits
+  }
+
+  function appendBoundedOutput(name, data, process) {
+    var current = String(root[name] || "")
+    var chunk = String(data || "")
+    var remaining = maxOutputChars - current.length
+    if (remaining <= 0) {
+      var existingLimits = {}
+      for (var existingKey in _truncatedOutputs) existingLimits[existingKey] = _truncatedOutputs[existingKey]
+      existingLimits[name] = true
+      _truncatedOutputs = existingLimits
+      process.running = false
+      return
+    }
+    root[name] = current + chunk.substring(0, remaining)
+    if (chunk.length > remaining) {
+      var limits = {}
+      for (var key in _truncatedOutputs) limits[key] = _truncatedOutputs[key]
+      limits[name] = true
+      _truncatedOutputs = limits
+      process.running = false
+    }
+  }
+
+  function takeOutputLimit(first, second) {
+    var limited = _truncatedOutputs[first] === true || _truncatedOutputs[second] === true
+    clearOutput(first)
+    clearOutput(second)
+    return limited
+  }
+
   function copyToClipboard(value, label) {
     var text = String(value || "")
     if (text === "") return
-    Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(text) + " | wl-copy"])
+    startManaged(clipboardProcess, [wlCopyPath, text], commandTimeoutMs)
   }
 
   function copyPeerIp(peer) {
@@ -142,7 +240,7 @@ Item {
     if (!canSendFiles(peer)) return
     var target = peerAddress(peer)
     if (target === "") return
-    Quickshell.execDetached(["omarchy-tailscale-send", target])
+    startManaged(taildropProcess, [taildropPath, target], 120000)
   }
 
   function refresh(forceAccounts) {
@@ -150,46 +248,33 @@ Item {
       refreshStatusAndAccounts(forceAccounts === true)
       return
     }
-    if (!whichProcess.running) {
+    if (!installCheckProcess.running) {
       refreshing = true
-      whichProcess.command = ["which", "tailscale"]
-      whichProcess.running = true
+      startManaged(installCheckProcess, [tailscalePath, "version"], commandTimeoutMs)
     }
   }
 
   function refreshStatusAndAccounts(forceAccounts) {
     if (!installed) return
-    var launched = false
     if (!statusProcess.running) {
-      _statusOutput = ""
-      _statusError = ""
+      clearOutput("_statusOutput")
+      clearOutput("_statusError")
       refreshing = true
-      statusProcess.command = ["tailscale", "status", "--json"]
-      statusProcess.running = true
-      launched = true
+      startManaged(statusProcess, tailscaleCommand(["status", "--json"]), commandTimeoutMs)
     }
     if (!mullvadExitNodesProcess.running) {
-      _mullvadExitNodesOutput = ""
-      _mullvadExitNodesError = ""
-      mullvadExitNodesProcess.command = ["tailscale", "exit-node", "list"]
-      mullvadExitNodesProcess.running = true
-      launched = true
+      clearOutput("_mullvadExitNodesOutput")
+      clearOutput("_mullvadExitNodesError")
+      startManaged(mullvadExitNodesProcess, tailscaleCommand(["exit-node", "list"]), commandTimeoutMs)
     }
     var now = Date.now()
     var shouldRefreshAccounts = forceAccounts === true || accounts.length === 0 || now - _lastAccountsRefreshMs > 60000
     if (shouldRefreshAccounts && !accountsProcess.running) {
-      _accountsOutput = ""
-      _accountsError = ""
+      clearOutput("_accountsOutput")
+      clearOutput("_accountsError")
       _lastAccountsRefreshMs = now
-      accountsProcess.command = ["tailscale", "switch", "--list", "--json"]
-      accountsProcess.running = true
-      launched = true
+      startManaged(accountsProcess, tailscaleCommand(["switch", "--list", "--json"]), commandTimeoutMs)
     }
-    // Arm on the launch that needs watching and leave it alone after that.
-    // Restarting it every refresh pushes the deadline out ahead of a hung
-    // process forever once the refresh interval is shorter than the timeout,
-    // and refreshIntervalSec goes down to five seconds.
-    if (launched && !pollWatchdog.running) pollWatchdog.start()
   }
 
   function elideStatus(text) {
@@ -290,7 +375,7 @@ Item {
     // No progress status here — the greyed icon and hero line already convey
     // the optimistic off; only surface a message if the command fails.
     _desired = 0
-    runAction(["tailscale", "down"])
+    runAction(tailscaleCommand(["down"]))
   }
 
   function loginOrUp() {
@@ -302,26 +387,24 @@ Item {
       openAuthUrlFrom(plan.authUrl, true)
       return
     }
-    _loginOutput = ""
-    _loginError = ""
+    clearOutput("_loginOutput")
+    clearOutput("_loginError")
     if (needsLogin) actionStatus = "Starting Tailscale login…"
     else _desired = 1
     _loginInProgress = needsLogin
     _loginUrlOpened = false
     _preLoginAuthUrl = authUrl
-    loginProcess.command = plan.command
-    loginProcess.running = true
+    startManaged(loginProcess, tailscaleCommand(plan.command), 120000)
     if (needsLogin) loginTimeoutTimer.restart()
   }
 
   function switchAccount(id) {
     var accountId = String(id || "")
     if (!installed || accountId === "" || accountId === selectedAccountId || switchProcess.running) return
-    _switchOutput = ""
-    _switchError = ""
+    clearOutput("_switchOutput")
+    clearOutput("_switchError")
     switchingAccountId = accountId
-    switchProcess.command = ["tailscale", "switch", accountId]
-    switchProcess.running = true
+    startManaged(switchProcess, tailscaleCommand(["switch", accountId]), commandTimeoutMs)
   }
 
   function exitNodeTarget(peer) {
@@ -338,29 +421,26 @@ Item {
     var active = peer.ExitNode === true
     var target = active ? "" : exitNodeTarget(peer)
     if (!active && target === "") return
-    _exitNodeOutput = ""
-    _exitNodeError = ""
+    clearOutput("_exitNodeOutput")
+    clearOutput("_exitNodeError")
     settingExitNodeId = String(peer.id || "")
-    exitNodeProcess.command = ["tailscale", "set", "--exit-node=" + target]
-    exitNodeProcess.running = true
+    startManaged(exitNodeProcess, tailscaleCommand(["set", "--exit-node=" + target]), commandTimeoutMs)
   }
 
   function authorizeTailscaleOperator() {
     if (!installed || operatorProcess.running || userName === "") return
-    _operatorOutput = ""
-    _operatorError = ""
+    clearOutput("_operatorOutput")
+    clearOutput("_operatorError")
     actionStatus = "Authorizing Tailscale operator..."
-    operatorProcess.command = ["pkexec", "tailscale", "set", "--operator=" + userName]
-    operatorProcess.running = true
+    startManaged(operatorProcess, [pkexecPath, tailscalePath, "set", "--operator=" + userName], 120000)
   }
 
   function runAction(command, label) {
     if (actionProcess.running) return
-    _actionOutput = ""
-    _actionError = ""
+    clearOutput("_actionOutput")
+    clearOutput("_actionError")
     actionStatus = label || ""
-    actionProcess.command = command
-    actionProcess.running = true
+    startManaged(actionProcess, command, commandTimeoutMs)
   }
 
   function openAuthUrlFrom(text, allowFallback) {
@@ -373,17 +453,16 @@ Item {
       _loginUrlOpened = true
       _loginInProgress = false
       loginTimeoutTimer.stop()
-      Quickshell.execDetached(["omarchy-launch-browser", url])
+      startManaged(browserProcess, [browserLauncherPath, url], commandTimeoutMs)
       return true
     }
     return false
   }
 
   function handleLoginOutput(data, isError) {
-    var text = String(data || "")
-    if (isError) _loginError += text + "\n"
-    else _loginOutput += text + "\n"
-    if (_loginInProgress && !_loginUrlOpened) openAuthUrlFrom(text, false)
+    var field = isError ? "_loginError" : "_loginOutput"
+    appendBoundedOutput(field, String(data || "") + "\n", loginProcess)
+    if (_loginInProgress && !_loginUrlOpened) openAuthUrlFrom(String(data || ""), false)
   }
 
   Timer {
@@ -419,18 +498,30 @@ Item {
   }
 
   Timer {
-    // Every poll is skipped while its own process is still running, so one that
-    // never exits — tailscale can hang on a network that is coming and going —
-    // silently stops the panel refreshing at all, and it stays stopped. Reap
-    // anything still running well inside the refresh interval so the next tick
-    // starts clean.
-    id: pollWatchdog
-    interval: 15000
-    repeat: false
+    // Every spawned helper has a deadline. This protects refreshes and
+    // interactive controls alike from a blocked daemon, helper, or polkit UI.
+    id: processWatchdog
+    interval: 250
+    repeat: true
+    running: true
     onTriggered: {
-      if (statusProcess.running) statusProcess.running = false
-      if (mullvadExitNodesProcess.running) mullvadExitNodesProcess.running = false
-      if (accountsProcess.running) accountsProcess.running = false
+      var now = Date.now()
+      var remaining = {}
+      var timedOut = {}
+      var expired = []
+      for (var key in root._processDeadlines) {
+        var entry = root._processDeadlines[key]
+        if (entry.deadline <= now) {
+          timedOut[key] = true
+          expired.push(entry.process)
+        } else {
+          remaining[key] = entry
+        }
+      }
+      root._processDeadlines = remaining
+      for (var priorTimeout in root._timedOutProcesses) timedOut[priorTimeout] = root._timedOutProcesses[priorTimeout]
+      root._timedOutProcesses = timedOut
+      for (var i = 0; i < expired.length; i++) expired[i].running = false
     }
   }
 
@@ -455,47 +546,70 @@ Item {
   }
 
   Process {
-    id: whichProcess
+    id: installCheckProcess
+    objectName: "installCheck"
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.safeEnvironment
     onExited: function(exitCode) {
-      root.installed = exitCode === 0
+      var timedOut = root.finishManaged(installCheckProcess)
+      root.installed = !timedOut && exitCode === 0
       if (root.installed) root.refreshStatusAndAccounts()
       else {
         root.refreshing = false
-        root.resetUnavailable("Not installed")
+        root.resetUnavailable(timedOut ? "Tailscale check timed out" : "Not installed")
       }
     }
   }
 
   Process {
     id: statusProcess
+    objectName: "status"
     running: false
     command: []
-    stdout: StdioCollector { id: statusStdout; waitForEnd: true; onStreamFinished: root._statusOutput = text }
-    stderr: StdioCollector { id: statusStderr; waitForEnd: true; onStreamFinished: root._statusError = text }
+    clearEnvironment: true
+    environment: root.safeEnvironment
+    stdout: SplitParser { onRead: function(data) { root.appendBoundedOutput("_statusOutput", data, statusProcess) } }
+    stderr: SplitParser { onRead: function(data) { root.appendBoundedOutput("_statusError", data, statusProcess) } }
     onExited: function(exitCode) {
+      var timedOut = root.finishManaged(statusProcess)
       root.refreshing = false
-      var stdout = String(statusStdout.text || root._statusOutput || "")
-      var stderr = String(statusStderr.text || root._statusError || "")
-      if (exitCode === 0) root.parseStatus(stdout)
+      var stdout = String(root._statusOutput || "")
+      var stderr = String(root._statusError || "")
+      var tooLarge = root.takeOutputLimit("_statusOutput", "_statusError")
+      if (timedOut) {
+        root.resetUnavailable("Tailscale status timed out")
+        root.lastError = "Tailscale status timed out"
+      } else if (tooLarge) {
+        root.resetUnavailable("Status output too large")
+        root.lastError = "Tailscale status exceeded the 256 KiB limit"
+      } else if (exitCode === 0) root.parseStatus(stdout)
       else {
         root.resetUnavailable("Disconnected")
-        root.lastError = stderr.trim()
+        root.lastError = root.elideStatus(stderr || "Tailscale status failed")
       }
     }
   }
 
   Process {
     id: accountsProcess
+    objectName: "accounts"
     running: false
     command: []
-    stdout: StdioCollector { id: accountsStdout; waitForEnd: true; onStreamFinished: root._accountsOutput = text }
-    stderr: StdioCollector { id: accountsStderr; waitForEnd: true; onStreamFinished: root._accountsError = text }
+    clearEnvironment: true
+    environment: root.safeEnvironment
+    stdout: SplitParser { onRead: function(data) { root.appendBoundedOutput("_accountsOutput", data, accountsProcess) } }
+    stderr: SplitParser { onRead: function(data) { root.appendBoundedOutput("_accountsError", data, accountsProcess) } }
     onExited: function(exitCode) {
-      var stdout = String(accountsStdout.text || root._accountsOutput || "")
-      var stderr = String(accountsStderr.text || root._accountsError || "")
-      if (exitCode === 0) root.parseAccounts(stdout)
+      var timedOut = root.finishManaged(accountsProcess)
+      var stdout = String(root._accountsOutput || "")
+      var stderr = String(root._accountsError || "")
+      var tooLarge = root.takeOutputLimit("_accountsOutput", "_accountsError")
+      if (timedOut || tooLarge) {
+        root.parseAccounts("")
+        root.lastError = timedOut ? "Tailscale account lookup timed out" : "Tailscale account output exceeded the 256 KiB limit"
+      } else if (exitCode === 0) root.parseAccounts(stdout)
       else {
         root.parseAccounts("")
         if (/profiles access denied/i.test(stderr) || /profiles access denied/i.test(stdout)) {
@@ -510,29 +624,39 @@ Item {
 
   Process {
     id: mullvadExitNodesProcess
+    objectName: "mullvadExitNodes"
     running: false
     command: []
-    stdout: StdioCollector { id: mullvadExitNodesStdout; waitForEnd: true; onStreamFinished: root._mullvadExitNodesOutput = text }
-    stderr: StdioCollector { id: mullvadExitNodesStderr; waitForEnd: true; onStreamFinished: root._mullvadExitNodesError = text }
+    clearEnvironment: true
+    environment: root.safeEnvironment
+    stdout: SplitParser { onRead: function(data) { root.appendBoundedOutput("_mullvadExitNodesOutput", data, mullvadExitNodesProcess) } }
+    stderr: SplitParser { onRead: function(data) { root.appendBoundedOutput("_mullvadExitNodesError", data, mullvadExitNodesProcess) } }
     onExited: function(exitCode) {
-      var stdout = String(mullvadExitNodesStdout.text || root._mullvadExitNodesOutput || "")
-      if (exitCode === 0) root.parseMullvadExitNodes(stdout)
+      var timedOut = root.finishManaged(mullvadExitNodesProcess)
+      var stdout = String(root._mullvadExitNodesOutput || "")
+      var tooLarge = root.takeOutputLimit("_mullvadExitNodesOutput", "_mullvadExitNodesError")
+      if (!timedOut && !tooLarge && exitCode === 0) root.parseMullvadExitNodes(stdout)
       else root.parseMullvadExitNodes("")
     }
   }
 
   Process {
     id: actionProcess
+    objectName: "action"
     running: false
     command: []
-    stdout: StdioCollector { id: actionStdout; waitForEnd: true; onStreamFinished: root._actionOutput = text }
-    stderr: StdioCollector { id: actionStderr; waitForEnd: true; onStreamFinished: root._actionError = text }
+    clearEnvironment: true
+    environment: root.safeEnvironment
+    stdout: SplitParser { onRead: function(data) { root.appendBoundedOutput("_actionOutput", data, actionProcess) } }
+    stderr: SplitParser { onRead: function(data) { root.appendBoundedOutput("_actionError", data, actionProcess) } }
     onExited: function(exitCode) {
-      var stdout = String(actionStdout.text || root._actionOutput || "")
-      var stderr = String(actionStderr.text || root._actionError || "")
-      if (exitCode !== 0) {
+      var timedOut = root.finishManaged(actionProcess)
+      var stdout = String(root._actionOutput || "")
+      var stderr = String(root._actionError || "")
+      var tooLarge = root.takeOutputLimit("_actionOutput", "_actionError")
+      if (timedOut || tooLarge || exitCode !== 0) {
         root._desired = -1
-        root.lastError = elideStatus(stderr || stdout || "Tailscale command failed")
+        root.lastError = timedOut ? "Tailscale command timed out" : (tooLarge ? "Tailscale command output exceeded the 256 KiB limit" : elideStatus(stderr || stdout || "Tailscale command failed"))
         root.actionStatus = root.lastError
         actionStatusTimer.restart()
       } else {
@@ -545,12 +669,26 @@ Item {
 
   Process {
     id: loginProcess
+    objectName: "login"
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.safeEnvironment
     stdout: SplitParser { onRead: function(data) { root.handleLoginOutput(data, false) } }
     stderr: SplitParser { onRead: function(data) { root.handleLoginOutput(data, true) } }
     onExited: function(exitCode) {
+      var timedOut = root.finishManaged(loginProcess)
       var combined = String(root._loginOutput || "") + "\n" + String(root._loginError || "")
+      var tooLarge = root.takeOutputLimit("_loginOutput", "_loginError")
+      if (timedOut || tooLarge) {
+        root._desired = -1
+        root._loginInProgress = false
+        root.lastError = timedOut ? "Tailscale login timed out" : "Tailscale login output exceeded the 256 KiB limit"
+        root.actionStatus = root.lastError
+        actionStatusTimer.restart()
+        delayedRefresh.restart()
+        return
+      }
       var opened = root.openAuthUrlFrom(combined, true)
       if (exitCode !== 0 && !opened) {
         root._desired = -1
@@ -568,15 +706,20 @@ Item {
 
   Process {
     id: switchProcess
+    objectName: "switch"
     running: false
     command: []
-    stdout: StdioCollector { id: switchStdout; waitForEnd: true; onStreamFinished: root._switchOutput = text }
-    stderr: StdioCollector { id: switchStderr; waitForEnd: true; onStreamFinished: root._switchError = text }
+    clearEnvironment: true
+    environment: root.safeEnvironment
+    stdout: SplitParser { onRead: function(data) { root.appendBoundedOutput("_switchOutput", data, switchProcess) } }
+    stderr: SplitParser { onRead: function(data) { root.appendBoundedOutput("_switchError", data, switchProcess) } }
     onExited: function(exitCode) {
-      var stdout = String(switchStdout.text || root._switchOutput || "")
-      var stderr = String(switchStderr.text || root._switchError || "")
-      if (exitCode !== 0) {
-        root.lastError = elideStatus(stderr || stdout || "Account switch failed")
+      var timedOut = root.finishManaged(switchProcess)
+      var stdout = String(root._switchOutput || "")
+      var stderr = String(root._switchError || "")
+      var tooLarge = root.takeOutputLimit("_switchOutput", "_switchError")
+      if (timedOut || tooLarge || exitCode !== 0) {
+        root.lastError = timedOut ? "Account switch timed out" : (tooLarge ? "Account switch output exceeded the 256 KiB limit" : elideStatus(stderr || stdout || "Account switch failed"))
         root.actionStatus = root.lastError
         actionStatusTimer.restart()
       } else {
@@ -591,15 +734,20 @@ Item {
 
   Process {
     id: exitNodeProcess
+    objectName: "exitNode"
     running: false
     command: []
-    stdout: StdioCollector { id: exitNodeStdout; waitForEnd: true; onStreamFinished: root._exitNodeOutput = text }
-    stderr: StdioCollector { id: exitNodeStderr; waitForEnd: true; onStreamFinished: root._exitNodeError = text }
+    clearEnvironment: true
+    environment: root.safeEnvironment
+    stdout: SplitParser { onRead: function(data) { root.appendBoundedOutput("_exitNodeOutput", data, exitNodeProcess) } }
+    stderr: SplitParser { onRead: function(data) { root.appendBoundedOutput("_exitNodeError", data, exitNodeProcess) } }
     onExited: function(exitCode) {
-      var stdout = String(exitNodeStdout.text || root._exitNodeOutput || "")
-      var stderr = String(exitNodeStderr.text || root._exitNodeError || "")
-      if (exitCode !== 0) {
-        root.lastError = elideStatus(stderr || stdout || "Exit node selection failed")
+      var timedOut = root.finishManaged(exitNodeProcess)
+      var stdout = String(root._exitNodeOutput || "")
+      var stderr = String(root._exitNodeError || "")
+      var tooLarge = root.takeOutputLimit("_exitNodeOutput", "_exitNodeError")
+      if (timedOut || tooLarge || exitCode !== 0) {
+        root.lastError = timedOut ? "Exit node selection timed out" : (tooLarge ? "Exit node output exceeded the 256 KiB limit" : elideStatus(stderr || stdout || "Exit node selection failed"))
         root.actionStatus = root.lastError
         actionStatusTimer.restart()
       } else {
@@ -613,15 +761,20 @@ Item {
 
   Process {
     id: operatorProcess
+    objectName: "operator"
     running: false
     command: []
-    stdout: StdioCollector { id: operatorStdout; waitForEnd: true; onStreamFinished: root._operatorOutput = text }
-    stderr: StdioCollector { id: operatorStderr; waitForEnd: true; onStreamFinished: root._operatorError = text }
+    clearEnvironment: true
+    environment: root.operatorEnvironment()
+    stdout: SplitParser { onRead: function(data) { root.appendBoundedOutput("_operatorOutput", data, operatorProcess) } }
+    stderr: SplitParser { onRead: function(data) { root.appendBoundedOutput("_operatorError", data, operatorProcess) } }
     onExited: function(exitCode) {
-      var stdout = String(operatorStdout.text || root._operatorOutput || "")
-      var stderr = String(operatorStderr.text || root._operatorError || "")
-      if (exitCode !== 0) {
-        root.lastError = elideStatus(stderr || stdout || "Tailscale authorization failed")
+      var timedOut = root.finishManaged(operatorProcess)
+      var stdout = String(root._operatorOutput || "")
+      var stderr = String(root._operatorError || "")
+      var tooLarge = root.takeOutputLimit("_operatorOutput", "_operatorError")
+      if (timedOut || tooLarge || exitCode !== 0) {
+        root.lastError = timedOut ? "Tailscale authorization timed out" : (tooLarge ? "Tailscale authorization output exceeded the 256 KiB limit" : elideStatus(stderr || stdout || "Tailscale authorization failed"))
         root.actionStatus = root.lastError
         actionStatusTimer.restart()
       } else {
@@ -633,5 +786,35 @@ Item {
       }
       delayedRefresh.restart()
     }
+  }
+
+  Process {
+    id: clipboardProcess
+    objectName: "clipboard"
+    running: false
+    command: []
+    clearEnvironment: true
+    environment: root.safeEnvironment
+    onExited: function() { root.finishManaged(clipboardProcess) }
+  }
+
+  Process {
+    id: taildropProcess
+    objectName: "taildrop"
+    running: false
+    command: []
+    clearEnvironment: true
+    environment: root.safeEnvironment
+    onExited: function() { root.finishManaged(taildropProcess) }
+  }
+
+  Process {
+    id: browserProcess
+    objectName: "browser"
+    running: false
+    command: []
+    clearEnvironment: true
+    environment: root.operatorEnvironment()
+    onExited: function() { root.finishManaged(browserProcess) }
   }
 }

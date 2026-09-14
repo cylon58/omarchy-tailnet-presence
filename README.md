@@ -10,6 +10,12 @@ The panel also retains the built-in Tailscale controls for connection state,
 account switching, exit-node selection, copying machine addresses, and
 Taildrop where available.
 
+## Security boundaries
+
+The plugin invokes Tailscale and its helpers by fixed absolute paths, uses a
+minimal environment for every managed process, limits captured output to
+256 KiB per stream, and cancels a command that exceeds its deadline.
+
 ## Requirements
 
 - Omarchy with Quickshell support

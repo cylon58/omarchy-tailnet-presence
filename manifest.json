@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "cylon58.tailnet-presence",
   "name": "Tailnet Presence",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "cylon58",
   "license": "MIT",
   "description": "Tailscale status with green online and red offline machine indicators.",

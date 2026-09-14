@@ -33,3 +33,15 @@ test("parseStatus retains online and offline tailnet machines", () => {
     ["beacon", false, "offline"]
   ])
 })
+
+test("parseStatus rejects status JSON beyond the bounded input size", () => {
+  const oversizedStatus = JSON.stringify({
+    BackendState: "Running",
+    padding: "x".repeat(300000)
+  })
+
+  const result = Model.parseStatus(oversizedStatus)
+
+  assert.equal(result.ok, false)
+  assert.equal(result.message, "Status output too large")
+})

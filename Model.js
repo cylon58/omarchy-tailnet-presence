@@ -70,7 +70,7 @@ function loginPlan(needsLogin, authUrl) {
   if (needsLogin === true && /^https?:\/\//.test(url)) {
     return { authUrl: url, command: [] }
   }
-  return { authUrl: "", command: ["tailscale", "up"] }
+  return { authUrl: "", command: ["up"] }
 }
 
 // Taildrop is a tailnet feature the admin can turn off, so the button for it
@@ -222,7 +222,13 @@ function mullvadCountryOptions(nodes) {
 }
 
 function parseStatus(raw) {
-  var text = String(raw || "").trim()
+  // Keep JSON parsing bounded even if a caller bypasses Service.qml's
+  // incremental process-output limit.
+  var text = String(raw || "")
+  if (text.length > 262144) {
+    return { ok: false, unavailable: true, message: "Status output too large", error: "Tailscale status exceeded the 256 KiB limit" }
+  }
+  text = text.trim()
   if (text === "") return { ok: true, unavailable: true, message: "Disconnected" }
 
   try {
